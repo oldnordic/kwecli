@@ -1,0 +1,73 @@
+# Real ACP System Dependencies
+# Production-ready requirements for Agent Communication Protocol implementation
+
+# Core async and networking
+asyncio-mqtt>=0.16.1
+websockets>=12.0
+aiohttp>=3.9.0
+aiofiles>=23.2.1
+
+# Database and persistence
+sqlalchemy[asyncio]>=2.0.0
+alembic>=1.13.0
+asyncpg>=0.29.0          # PostgreSQL async driver
+aiosqlite>=0.19.0        # SQLite async driver
+psutil>=5.9.0            # System monitoring
+
+# Data validation and serialization
+pydantic>=2.5.0
+pydantic[email]>=2.5.0   # Email validation
+marshmallow>=3.20.0      # Alternative serialization
+msgpack>=1.0.7           # Binary serialization
+
+# Security and cryptography
+cryptography>=41.0.0
+PyJWT>=2.8.0
+bcrypt>=4.1.0
+pycryptodome>=3.19.0
+python-jose[cryptography]>=3.3.0
+
+# Configuration management
+PyYAML>=6.0.1
+toml>=0.10.2
+python-dotenv>=1.0.0
+click>=8.1.0             # CLI interface
+
+# HTTP client/server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+httpx>=0.25.0
+requests>=2.31.0
+
+# Testing framework
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+pytest-mock>=3.12.0
+pytest-benchmark>=4.0.0
+httpx>=0.25.0            # For testing HTTP endpoints
+
+# Logging and monitoring
+structlog>=23.2.0
+colorlog>=6.8.0
+prometheus-client>=0.19.0
+
+# Task queue and concurrency
+celery[redis]>=5.3.0     # Optional task queue
+redis>=5.0.0             # Caching and task queue backend
+
+# Development and debugging
+black>=23.0.0            # Code formatting
+isort>=5.12.0            # Import sorting
+flake8>=6.1.0            # Linting
+mypy>=1.7.0              # Type checking
+bandit>=1.7.5            # Security linting
+
+# Optional performance enhancements
+uvloop>=0.19.0           # Faster event loop (Unix only)
+orjson>=3.9.0            # Faster JSON serialization
+msgpack>=1.0.7           # Binary message format
+
+# Documentation
+sphinx>=7.2.0            # Documentation generator
+sphinx-rtd-theme>=1.3.0  # Read the docs theme

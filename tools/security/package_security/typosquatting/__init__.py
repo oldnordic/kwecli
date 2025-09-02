@@ -1,0 +1,1 @@
+# Advanced typosquatting detection package

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "ltmc": {
+      "command": "/home/feanor/Projects/kwecli/ltmc_binary",
+      "args": [],
+      "cwd": "/home/feanor/Projects/kwecli",
+      "env": {
+        "LTMC_CONFIG_PATH": "/home/feanor/Projects/kwecli/ltmc_config.json"
+      }
+    }
+  }
+}
