@@ -1,30 +1,32 @@
+#!/usr/bin/env python3
 """
-Tool Executor for the KWE CLI Tools System.
+Tool Executor - Modular Entry Point
+===================================
 
-This module provides safe and monitored tool execution with comprehensive
-error handling, resource monitoring, timeout management, and caching capabilities.
+Safe and monitored tool execution with comprehensive modular architecture.
+Streamlined version following CLAUDE.md ≤300 lines rule.
+
+File: tools/core/executor_streamlined.py
+Purpose: Main tool execution interface with modular imports (≤300 lines)
 """
 
 import asyncio
 import time
-import threading
-import hashlib
-import json
-from typing import Dict, Any, Optional, Callable, List
-from datetime import datetime, timedelta
 import logging
-try:
-    import psutil
-    PSUTIL_AVAILABLE = True
-except ImportError:
-    PSUTIL_AVAILABLE = False
-    psutil = None
+from typing import Dict, Any, Optional, Callable
+from datetime import datetime
 
-import os
+# Import modular components
+from .execution_cache import ExecutionCacheManager
+from .resource_monitor import ResourceMonitor
+from .execution_manager import ExecutionManager
 
+# Import base types
 from .models import ToolResult, ExecutionStatus, ExecutionContext
 from .registry import ToolRegistry
 from .tool_interface import BaseTool
+
+logger = logging.getLogger(__name__)
 
 
 class ExecutionTimeoutError(Exception):
@@ -39,38 +41,43 @@ class ExecutionError(Exception):
 
 class ToolExecutor:
     """
-    Executes tools with comprehensive monitoring and safety features.
+    Comprehensive tool executor with modular architecture.
+    
+    Modular Components:
+    - ExecutionManager: Active execution tracking, cancellation, and statistics
+    - ExecutionCacheManager: TTL-based result caching and cache management
+    - ResourceMonitor: System resource monitoring with psutil integration
     
     Provides async tool execution with timeout handling, retry mechanisms,
-    resource monitoring, progress tracking, and result caching.
+    resource monitoring, progress tracking, and result caching through
+    enterprise-grade modular components.
     """
     
     def __init__(
         self,
         max_concurrent_executions: int = 10,
         default_timeout: float = 120.0,
-        enable_resource_monitoring: bool = True
+        enable_resource_monitoring: bool = True,
+        enable_caching: bool = False,
+        cache_ttl: int = 3600
     ):
-        self.max_concurrent_executions = max_concurrent_executions
+        """Initialize tool executor with modular components."""
         self.default_timeout = default_timeout
-        self.enable_resource_monitoring = enable_resource_monitoring
         
-        # Execution tracking
-        self._active_executions: Dict[str, ExecutionContext] = {}
+        # Initialize modular components
+        self.execution_manager = ExecutionManager(max_concurrent_executions)
+        self.cache_manager = ExecutionCacheManager(default_ttl=cache_ttl)
+        self.resource_monitor = ResourceMonitor(enable_monitoring=enable_resource_monitoring)
+        
+        # Enable caching if requested
+        if enable_caching:
+            self.cache_manager.enable_caching(cache_ttl)
+        
+        # Execution semaphore for async coordination
         self._execution_semaphore = asyncio.Semaphore(max_concurrent_executions)
-        self._execution_lock = threading.RLock()
-        
-        # Caching
-        self._cache_enabled = False
-        self._cache_ttl = 3600  # 1 hour default
-        self._cache: Dict[str, Dict[str, Any]] = {}
-        self._cache_lock = threading.RLock()
-        
-        # Resource monitoring
-        self._resource_monitor = psutil.Process() if PSUTIL_AVAILABLE else None
         
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
-        self.logger.info("ToolExecutor initialized")
+        self.logger.info("ToolExecutor initialized with modular architecture")
     
     async def execute_tool(
         self,
@@ -82,33 +89,13 @@ class ToolExecutor:
         progress_callback: Optional[Callable[[float, str], None]] = None,
         monitor_resources: bool = False
     ) -> ToolResult:
-        """
-        Execute a tool with comprehensive monitoring and error handling.
+        """Execute a tool with comprehensive monitoring and error handling."""
         
-        Args:
-            tool_name: Name of tool to execute
-            parameters: Parameters for tool execution
-            registry: Tool registry to get tool from
-            timeout: Execution timeout in seconds
-            max_retries: Maximum retry attempts
-            progress_callback: Optional progress monitoring callback
-            monitor_resources: Enable resource usage monitoring
-            
-        Returns:
-            ToolResult with execution details
-            
-        Raises:
-            ExecutionTimeoutError: If execution times out
-            ExecutionError: If tool not found or other errors
-        """
-        execution_id = self._generate_execution_id(tool_name, parameters)
-        start_time = time.time()
-        
-        # Check cache first
-        if self._cache_enabled:
-            cached_result = self._get_cached_result(tool_name, parameters)
+        # Check cache first using cache manager
+        if self.cache_manager.is_enabled():
+            cached_result = self.cache_manager.get_cached_result(tool_name, parameters)
             if cached_result:
-                cached_result["metadata"]["cached"] = True
+                self.logger.debug(f"Returning cached result for {tool_name}")
                 return ToolResult.from_dict(cached_result)
         
         # Get tool from registry
@@ -117,6 +104,7 @@ class ToolExecutor:
             raise ExecutionError(f"Tool '{tool_name}' not found in registry")
         
         # Create execution context
+        execution_id = self.cache_manager.generate_cache_key(tool_name, parameters)
         context = ExecutionContext(
             execution_id=execution_id,
             tool_name=tool_name,
@@ -143,9 +131,9 @@ class ToolExecutor:
                         monitor_resources=monitor_resources
                     )
                 
-                # Cache successful result
-                if self._cache_enabled and result.success:
-                    self._cache_result(tool_name, parameters, result)
+                # Cache successful result using cache manager
+                if self.cache_manager.is_enabled() and result.success:
+                    self.cache_manager.store_result(tool_name, parameters, result.to_dict())
                 
                 if progress_callback:
                     progress_callback(1.0, "Execution completed")
@@ -167,7 +155,12 @@ class ToolExecutor:
                         progress_callback(0.1 * (attempt + 1), f"Retrying (attempt {attempt + 2})")
         
         # All retries failed
-        execution_time = time.time() - start_time
+        execution_time = time.time() - context.created_at.timestamp()
+        
+        # Complete execution with failure status
+        self.execution_manager.complete_execution(
+            execution_id, ExecutionStatus.FAILED, execution_time
+        )
         
         error_result = ToolResult(
             success=False,
@@ -178,7 +171,8 @@ class ToolExecutor:
             metadata={
                 "retry_count": max_retries,
                 "final_attempt": max_retries + 1,
-                "tool_name": tool_name
+                "tool_name": tool_name,
+                "exception_type": type(last_exception).__name__
             }
         )
         
@@ -194,34 +188,26 @@ class ToolExecutor:
         progress_callback: Optional[Callable[[float, str], None]],
         monitor_resources: bool
     ) -> ToolResult:
-        """Execute tool with monitoring and timeout handling."""
+        """Execute tool with monitoring and timeout handling using modular components."""
         
-        # Track active execution
-        with self._execution_lock:
-            self._active_executions[context.execution_id] = context
+        # Register execution with execution manager
+        if not self.execution_manager.start_execution(context):
+            raise ExecutionError("Execution rejected due to capacity limits")
         
-        context.start_execution()
+        # Start resource monitoring session
+        resource_session = None
+        if monitor_resources and self.resource_monitor.is_available():
+            resource_session = self.resource_monitor.start_monitoring_session()
         
         try:
-            # Resource monitoring setup
-            initial_memory = None
-            if (monitor_resources or self.enable_resource_monitoring) and self._resource_monitor:
-                try:
-                    initial_memory = self._resource_monitor.memory_info().rss
-                except Exception:
-                    initial_memory = None
-            
             # Parameter validation
-            try:
-                await tool.pre_execute(context.parameters)
-            except Exception as e:
-                return ToolResult(
-                    success=False,
-                    error_message=f"Parameter validation failed: {str(e)}",
-                    status=ExecutionStatus.FAILED,
-                    execution_time=0.0,
-                    execution_id=context.execution_id
-                )
+            if hasattr(tool, 'pre_execute'):
+                try:
+                    await tool.pre_execute(context.parameters)
+                except Exception as e:
+                    return self._create_error_result(
+                        context, f"Parameter validation failed: {str(e)}", ExecutionStatus.FAILED
+                    )
             
             # Progress update
             if progress_callback:
@@ -238,191 +224,170 @@ class ToolExecutor:
                     result_data = await tool.execute(context.parameters)
                     
             except asyncio.TimeoutError:
-                raise ExecutionTimeoutError(f"Tool '{tool.name}' execution timed out after {context.timeout} seconds")
+                # Complete execution with timeout status
+                execution_time = time.time() - context.created_at.timestamp()
+                self.execution_manager.complete_execution(
+                    context.execution_id, ExecutionStatus.TIMEOUT, execution_time
+                )
+                raise ExecutionTimeoutError(
+                    f"Tool '{tool.name}' execution timed out after {context.timeout} seconds"
+                )
             
             # Progress update
             if progress_callback:
                 progress_callback(0.8, "Execution completed, processing results")
             
             # Post-execution processing
-            try:
-                result_data = await tool.post_execute(context.parameters, result_data)
-            except Exception as e:
-                self.logger.warning(f"Post-execution processing failed: {e}")
-                # Continue with original result
-            
-            # Calculate execution time
-            execution_time = time.time() - context.created_at.timestamp()
-            context.complete_execution(ExecutionStatus.COMPLETED)
-            
-            # Resource monitoring
-            resource_usage = {}
-            if (monitor_resources or self.enable_resource_monitoring) and self._resource_monitor:
+            if hasattr(tool, 'post_execute'):
                 try:
-                    current_memory = self._resource_monitor.memory_info().rss
-                    cpu_times = self._resource_monitor.cpu_times()
-                    resource_usage = {
-                        "memory_peak": max(initial_memory or 0, current_memory),
-                        "memory_delta": current_memory - (initial_memory or 0),
-                        "cpu_time": sum(cpu_times[:2])  # user + system time
-                    }
-                except Exception:
-                    resource_usage = {"error": "Resource monitoring failed"}
+                    result_data = await tool.post_execute(context.parameters, result_data)
+                except Exception as e:
+                    self.logger.warning(f"Post-execution processing failed: {e}")
+                    # Continue with original result
             
-            # Create result
-            success = result_data.get("success", True)
-            output = result_data.get("output", "")
-            
-            # Handle data field - use the entire result dict as data (excluding success/output for metadata)
-            # But include all fields as they might be expected by the test
-            data = {k: v for k, v in result_data.items() if k not in ["success", "output"]}
-            
-            # If there's no data after filtering, use the original result as data
-            if not data:
-                data = result_data
-            
-            result = ToolResult(
-                success=success,
-                output=output,
-                data=data,
-                status=ExecutionStatus.COMPLETED,
-                execution_time=execution_time,
-                execution_id=context.execution_id,
-                metadata={
-                    "tool_name": tool.name,
-                    "resource_usage": resource_usage,
-                    "retry_count": context.attempt_count - 1,
-                    "context": result_data.get("context", {})
-                }
+            # Calculate execution time and complete execution
+            execution_time = time.time() - context.created_at.timestamp()
+            self.execution_manager.complete_execution(
+                context.execution_id, ExecutionStatus.COMPLETED, execution_time
             )
             
-            return result
+            # Get resource usage from resource monitor
+            resource_usage = {}
+            if resource_session and self.resource_monitor.is_available():
+                usage_delta = self.resource_monitor.calculate_usage_delta(resource_session)
+                if usage_delta.get("monitoring_available", False):
+                    resource_usage = {
+                        "memory_delta_mb": usage_delta.get("memory_delta_mb", 0),
+                        "peak_memory_mb": usage_delta.get("peak_memory_mb", 0),
+                        "cpu_utilization_percent": usage_delta.get("cpu_utilization_percent", 0),
+                        "time_elapsed_seconds": usage_delta.get("time_elapsed_seconds", 0)
+                    }
+            
+            # Create comprehensive result
+            return self._create_success_result(context, result_data, execution_time, resource_usage)
             
         except ExecutionTimeoutError:
             # Let timeout errors propagate up
             raise
         except Exception as e:
-            context.complete_execution(ExecutionStatus.FAILED)
             execution_time = time.time() - context.created_at.timestamp()
-            
-            return ToolResult(
-                success=False,
-                error_message=str(e),
-                status=ExecutionStatus.FAILED,
-                execution_time=execution_time,
-                execution_id=context.execution_id,
-                metadata={
-                    "tool_name": tool.name,
-                    "exception_type": type(e).__name__
-                }
+            self.execution_manager.complete_execution(
+                context.execution_id, ExecutionStatus.FAILED, execution_time
             )
-        
-        finally:
-            # Cleanup
-            with self._execution_lock:
-                self._active_executions.pop(context.execution_id, None)
-            
-            context.cleanup()
+            return self._create_error_result(context, str(e), ExecutionStatus.FAILED, execution_time)
     
-    def enable_caching(self, cache_ttl: int = 3600):
-        """
-        Enable result caching.
+    def _create_success_result(
+        self, context: ExecutionContext, result_data: Dict[str, Any], 
+        execution_time: float, resource_usage: Dict[str, Any]
+    ) -> ToolResult:
+        """Create successful execution result with comprehensive metadata."""
+        success = result_data.get("success", True)
+        output = result_data.get("output", "")
         
-        Args:
-            cache_ttl: Cache time-to-live in seconds
-        """
-        self._cache_enabled = True
-        self._cache_ttl = cache_ttl
-        self.logger.info(f"Caching enabled with TTL: {cache_ttl} seconds")
+        # Handle data field - preserve all result data
+        data = {k: v for k, v in result_data.items() if k not in ["success", "output"]}
+        if not data:
+            data = result_data
+        
+        return ToolResult(
+            success=success,
+            output=output,
+            data=data,
+            status=ExecutionStatus.COMPLETED,
+            execution_time=execution_time,
+            execution_id=context.execution_id,
+            metadata={
+                "tool_name": context.tool_name,
+                "resource_usage": resource_usage,
+                "retry_count": context.attempt_count - 1,
+                "context": result_data.get("context", {}),
+                "monitoring_available": self.resource_monitor.is_available(),
+                "cache_enabled": self.cache_manager.is_enabled()
+            }
+        )
+    
+    def _create_error_result(
+        self, context: ExecutionContext, error_message: str, 
+        status: ExecutionStatus, execution_time: float = 0.0
+    ) -> ToolResult:
+        """Create error execution result."""
+        return ToolResult(
+            success=False,
+            error_message=error_message,
+            status=status,
+            execution_time=execution_time,
+            execution_id=context.execution_id,
+            metadata={
+                "tool_name": context.tool_name,
+                "attempt_count": context.attempt_count
+            }
+        )
+    
+    # Delegate methods to modular components
+    def enable_caching(self, cache_ttl: Optional[int] = None):
+        """Enable result caching using cache manager."""
+        self.cache_manager.enable_caching(cache_ttl)
     
     def disable_caching(self):
-        """Disable result caching."""
-        self._cache_enabled = False
-        with self._cache_lock:
-            self._cache.clear()
-        self.logger.info("Caching disabled")
+        """Disable result caching using cache manager."""
+        self.cache_manager.disable_caching()
     
-    def _generate_execution_id(self, tool_name: str, parameters: Dict[str, Any]) -> str:
-        """Generate unique execution ID."""
-        content = f"{tool_name}:{json.dumps(parameters, sort_keys=True)}"
-        return hashlib.md5(content.encode()).hexdigest()[:16]
+    def clear_cache(self) -> int:
+        """Clear all cached results using cache manager."""
+        return self.cache_manager.clear_cache()
     
-    def _get_cache_key(self, tool_name: str, parameters: Dict[str, Any]) -> str:
-        """Generate cache key for tool execution."""
-        return self._generate_execution_id(tool_name, parameters)
+    def get_cache_info(self) -> Dict[str, Any]:
+        """Get comprehensive cache information from cache manager."""
+        return self.cache_manager.get_cache_info()
     
-    def _get_cached_result(self, tool_name: str, parameters: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Get cached result if available and not expired."""
-        if not self._cache_enabled:
-            return None
-        
-        cache_key = self._get_cache_key(tool_name, parameters)
-        
-        with self._cache_lock:
-            if cache_key not in self._cache:
-                return None
-            
-            cached_item = self._cache[cache_key]
-            
-            # Check expiration
-            cached_time = datetime.fromisoformat(cached_item["cached_at"])
-            if datetime.now() - cached_time > timedelta(seconds=self._cache_ttl):
-                del self._cache[cache_key]
-                return None
-            
-            return cached_item["result"]
+    def get_system_overview(self) -> Dict[str, Any]:
+        """Get system resource overview from resource monitor."""
+        return self.resource_monitor.get_system_overview()
     
-    def _cache_result(self, tool_name: str, parameters: Dict[str, Any], result: ToolResult):
-        """Cache execution result."""
-        if not self._cache_enabled:
-            return
-        
-        cache_key = self._get_cache_key(tool_name, parameters)
-        
-        with self._cache_lock:
-            self._cache[cache_key] = {
-                "result": result.to_dict(),
-                "cached_at": datetime.now().isoformat()
-            }
-    
-    def get_active_executions(self) -> List[str]:
-        """Get list of active execution IDs."""
-        with self._execution_lock:
-            return list(self._active_executions.keys())
+    def get_active_executions(self):
+        """Get active executions from execution manager."""
+        return self.execution_manager.get_active_executions()
     
     def cancel_execution(self, execution_id: str) -> bool:
-        """
-        Cancel an active execution.
-        
-        Args:
-            execution_id: ID of execution to cancel
-            
-        Returns:
-            True if execution was cancelled
-        """
-        with self._execution_lock:
-            if execution_id in self._active_executions:
-                context = self._active_executions[execution_id]
-                context.status = ExecutionStatus.CANCELLED
-                # Note: Actual cancellation depends on tool implementation
-                return True
-            return False
+        """Cancel execution using execution manager."""
+        return self.execution_manager.cancel_execution(execution_id)
     
-    def clear_cache(self):
-        """Clear all cached results."""
-        with self._cache_lock:
-            self._cache.clear()
-        self.logger.info("Cache cleared")
+    def get_execution_statistics(self) -> Dict[str, Any]:
+        """Get execution statistics from execution manager."""
+        return self.execution_manager.get_execution_statistics()
     
-    def get_cache_stats(self) -> Dict[str, Any]:
-        """Get cache statistics."""
-        with self._cache_lock:
-            return {
-                "enabled": self._cache_enabled,
-                "ttl_seconds": self._cache_ttl,
-                "cached_items": len(self._cache),
-                "total_size_bytes": sum(
-                    len(json.dumps(item).encode()) 
-                    for item in self._cache.values()
-                )
+    def get_comprehensive_stats(self) -> Dict[str, Any]:
+        """Get comprehensive statistics from all components."""
+        return {
+            "execution_stats": self.get_execution_statistics(),
+            "cache_info": self.get_cache_info(),
+            "monitoring_stats": self.resource_monitor.get_monitoring_stats(),
+            "system_overview": self.get_system_overview() if self.resource_monitor.is_available() else {},
+            "component_status": {
+                "execution_manager_active": len(self.execution_manager.get_active_execution_ids()) > 0,
+                "cache_manager_enabled": self.cache_manager.is_enabled(),
+                "resource_monitor_available": self.resource_monitor.is_available()
             }
+        }
+
+
+# Test functionality if run directly
+if __name__ == "__main__":
+    import asyncio
+    
+    print("🧪 Testing Streamlined Tool Executor...")
+    
+    async def test_executor():
+        # Test executor initialization
+        executor = ToolExecutor(enable_caching=True, enable_resource_monitoring=True)
+        print("✅ Executor initialized with modular components")
+        
+        # Test comprehensive stats
+        stats = executor.get_comprehensive_stats()
+        print(f"✅ Stats components: {len(stats)} categories")
+        
+        return executor
+    
+    # Run test
+    executor = asyncio.run(test_executor())
+    print("✅ Streamlined Tool Executor test complete")

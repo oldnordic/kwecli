@@ -1,11 +1,17 @@
 """
-KWE CLI Native LTMC Bridge - Modular Components
+KWECLI Bridge Package
+=====================
 
-This package contains the modular components for the native LTMC bridge,
-split into focused modules under 300 lines each for maintainability.
+Native LTMC integration bridge for zero-latency tool access.
 """
 
+from .ltmc_bridge_core import get_ltmc_bridge, AdvancedLTMCBridge
 from .bridge_core import NativeLTMCBridge
 from .bridge_utils import get_native_ltmc_bridge
 
-__all__ = ['NativeLTMCBridge', 'get_native_ltmc_bridge']
+__all__ = [
+    "get_ltmc_bridge",
+    "AdvancedLTMCBridge", 
+    "NativeLTMCBridge",
+    "get_native_ltmc_bridge"
+]

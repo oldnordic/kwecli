@@ -1,0 +1,59 @@
+{
+    "kwecli": {
+        "name": "KWECLI",
+        "version": "1.0.0",
+        "description": "Knowledge Workflow Engine CLI - Autonomous Development Tool"
+    },
+    "ollama": {
+        "base_url": "http://localhost:11434",
+        "model": "llama3.2:latest",
+        "timeout": 30
+    },
+    "storage": {
+        "enable_memory": true,
+        "ltmc_integration": true,
+        "backup_dir": "~/.kwecli/backups",
+        "cache_ttl": 3600
+    },
+    "tools": {
+        "file_operations": {
+            "enable_memory_storage": true,
+            "max_file_size": "10MB",
+            "supported_extensions": [".py", ".js", ".ts", ".rs", ".md", ".txt", ".json", ".yaml", ".toml"]
+        },
+        "pattern_extraction": {
+            "enable_ast_analysis": true,
+            "complexity_analysis": true,
+            "include_comments": true,
+            "max_functions_per_file": 100
+        },
+        "modern_unix": {
+            "enable_external_tools": true,
+            "tools_available": ["rg", "exa", "fd", "bat", "delta", "fzf", "tree"]
+        }
+    },
+    "ltmc_integration": {
+        "enable_direct_storage": true,
+        "conversation_id": "kwecli_operations",
+        "resource_type": "kwecli_generated",
+        "atomic_operations": true,
+        "databases": {
+            "sqlite": true,
+            "faiss": true,
+            "neo4j": true,
+            "redis": true
+        }
+    },
+    "performance": {
+        "enable_metrics": true,
+        "log_operations": true,
+        "token_optimization": true,
+        "cache_strategy": "memory_first"
+    },
+    "logging": {
+        "level": "INFO",
+        "file": "~/.kwecli/logs/kwecli.log",
+        "max_size": "50MB",
+        "backup_count": 5
+    }
+}

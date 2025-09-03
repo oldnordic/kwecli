@@ -1,17 +1,29 @@
+#!/usr/bin/env python3
 """
-Tool Registry for the KWE CLI Tools System.
+Tool Registry - Modular Entry Point
+===================================
 
-This module provides centralized tool registration, discovery, and management
-with thread-safe operations and comprehensive tool metadata tracking.
+Central tool registry using smart modular architecture.
+Rebuilt from registry.py following CLAUDE.md ≤300 lines rule.
+
+File: tools/core/registry_modular.py
+Purpose: Main tool registry interface with modular imports (≤300 lines)
 """
 
-from typing import Dict, List, Optional, Any, Set
 import threading
 import logging
+from typing import Dict, List, Optional, Any, Set
 from datetime import datetime
 
+# Import modular components
+from .tool_discovery import ToolDiscoveryManager
+from .tool_health_monitor import ToolHealthMonitor
+
+# Import base types
 from .tool_interface import BaseTool
 from .models import ToolInfo
+
+logger = logging.getLogger(__name__)
 
 
 class ToolRegistrationError(Exception):
@@ -21,45 +33,42 @@ class ToolRegistrationError(Exception):
 
 class ToolRegistry:
     """
-    Central registry for all KWE CLI tools.
+    Central registry for all KWE CLI tools with modular architecture.
+    
+    Modular Components:
+    - ToolDiscoveryManager: Automatic tool discovery and registration
+    - ToolHealthMonitor: Comprehensive health checking and monitoring
     
     Manages tool registration, discovery, categorization, and health monitoring
-    with thread-safe operations for concurrent access.
+    with thread-safe operations for concurrent access in production environments.
     """
     
     def __init__(self):
+        """Initialize tool registry with modular components and thread safety."""
+        # Core registry storage
         self._tools: Dict[str, BaseTool] = {}
         self._categories: Dict[str, Set[str]] = {}
         self._capabilities: Dict[str, Set[str]] = {}
         self._lock = threading.RLock()
-        self._health_status: Dict[str, Dict[str, Any]] = {}
+        
+        # Initialize modular components
+        self.discovery_manager = ToolDiscoveryManager(registry_instance=self)
+        self.health_monitor = ToolHealthMonitor()
+        
+        # Registry statistics
+        self.registry_stats = {
+            "total_registrations": 0,
+            "failed_registrations": 0,
+            "unregistrations": 0,
+            "health_checks_requested": 0
+        }
+        
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
-        
-        self.logger.info("ToolRegistry initialized")
-    
-    def list_tools(self) -> List[str]:
-        """
-        Get list of all registered tool names.
-        
-        Returns:
-            List of tool names
-        """
-        with self._lock:
-            return list(self._tools.keys())
-    
-    def list_categories(self) -> List[str]:
-        """
-        Get list of all tool categories.
-        
-        Returns:
-            List of category names
-        """
-        with self._lock:
-            return list(self._categories.keys())
+        self.logger.info("ToolRegistry initialized with modular architecture")
     
     def register_tool(self, tool: BaseTool) -> None:
         """
-        Register a tool in the registry.
+        Register a tool in the registry with comprehensive validation.
         
         Args:
             tool: Tool instance to register
@@ -68,21 +77,28 @@ class ToolRegistry:
             ToolRegistrationError: If tool is already registered
             ValueError: If tool is invalid
         """
+        # Validate tool instance
         if not isinstance(tool, BaseTool):
+            self.registry_stats["failed_registrations"] += 1
             raise ValueError(f"Tool must be instance of BaseTool, got {type(tool)}")
         
         # Validate required attributes
+        validation_errors = []
         if not hasattr(tool, 'name') or not tool.name:
-            raise ValueError("Tool must have a valid name")
-        
+            validation_errors.append("Tool must have a valid name")
         if not hasattr(tool, 'category') or not tool.category:
-            raise ValueError("Tool must have a valid category")
-        
+            validation_errors.append("Tool must have a valid category")
         if not hasattr(tool, 'capabilities') or not tool.capabilities:
-            raise ValueError("Tool must have capabilities")
+            validation_errors.append("Tool must have capabilities")
+        
+        if validation_errors:
+            self.registry_stats["failed_registrations"] += 1
+            raise ValueError(f"Tool validation failed: {'; '.join(validation_errors)}")
         
         with self._lock:
+            # Check for duplicate registration
             if tool.name in self._tools:
+                self.registry_stats["failed_registrations"] += 1
                 raise ToolRegistrationError(f"Tool '{tool.name}' is already registered")
             
             # Register the tool
@@ -99,11 +115,52 @@ class ToolRegistry:
                     self._capabilities[capability] = set()
                 self._capabilities[capability].add(tool.name)
             
-            self.logger.info(f"Registered tool: {tool.name} ({tool.category})")
+            self.registry_stats["total_registrations"] += 1
+            self.logger.info(f"Registered tool: {tool.name} ({tool.category}) with {len(tool.capabilities)} capabilities")
+    
+    def unregister_tool(self, tool_name: str) -> bool:
+        """
+        Unregister a tool from the registry.
+        
+        Args:
+            tool_name: Name of tool to unregister
+            
+        Returns:
+            True if tool was unregistered, False if not found
+        """
+        with self._lock:
+            if tool_name not in self._tools:
+                return False
+            
+            tool = self._tools[tool_name]
+            
+            # Remove from tools
+            del self._tools[tool_name]
+            
+            # Remove from categories
+            category = tool.category
+            if category in self._categories:
+                self._categories[category].discard(tool_name)
+                if not self._categories[category]:
+                    del self._categories[category]
+            
+            # Remove from capabilities
+            for capability in tool.capabilities:
+                if capability in self._capabilities:
+                    self._capabilities[capability].discard(tool_name)
+                    if not self._capabilities[capability]:
+                        del self._capabilities[capability]
+            
+            # Clear health status cache
+            self.health_monitor.clear_health_cache(tool_name)
+            
+            self.registry_stats["unregistrations"] += 1
+            self.logger.info(f"Unregistered tool: {tool_name}")
+            return True
     
     def get_tool(self, name: str) -> Optional[BaseTool]:
         """
-        Get tool by name.
+        Get tool by name with thread-safe access.
         
         Args:
             name: Tool name
@@ -113,6 +170,16 @@ class ToolRegistry:
         """
         with self._lock:
             return self._tools.get(name)
+    
+    def list_tools(self) -> List[str]:
+        """Get list of all registered tool names."""
+        with self._lock:
+            return list(self._tools.keys())
+    
+    def list_categories(self) -> List[str]:
+        """Get list of all tool categories."""
+        with self._lock:
+            return list(self._categories.keys())
     
     def get_tools_by_category(self, category: str) -> List[BaseTool]:
         """
@@ -148,165 +215,9 @@ class ToolRegistry:
             tool_names = self._capabilities[capability]
             return [self._tools[name] for name in tool_names if name in self._tools]
     
-    def to_dict(self) -> Dict[str, Any]:
-        """
-        Serialize registry to dictionary.
-        
-        Returns:
-            Dictionary representation of registry
-        """
-        with self._lock:
-            return {
-                "tools": {
-                    name: tool.get_info().to_dict() 
-                    for name, tool in self._tools.items()
-                },
-                "categories": {
-                    category: list(tool_names) 
-                    for category, tool_names in self._categories.items()
-                },
-                "capabilities": {
-                    capability: list(tool_names)
-                    for capability, tool_names in self._capabilities.items()
-                },
-                "total_tools": len(self._tools),
-                "last_updated": datetime.now().isoformat()
-            }
-    
-    def discover_filesystem_tools(self) -> None:
-        """
-        Automatically discover and register filesystem tools.
-        
-        This method discovers standard filesystem tools that should
-        be available in the system.
-        """
-        # Import filesystem tools dynamically to avoid circular imports
-        try:
-            from ..filesystem.file_operations import (
-                ReadTool, WriteTool, EditTool, MultiEditTool
-            )
-            from ..filesystem.search_operations import GlobTool, GrepTool
-            from ..filesystem.directory_operations import DirectoryListerTool
-            
-            # Register filesystem tools
-            filesystem_tools = [
-                ("read", ReadTool),
-                ("write", WriteTool), 
-                ("edit", EditTool),
-                ("multi_edit", MultiEditTool),
-                ("grep", GrepTool),
-                ("ls", DirectoryListerTool)
-            ]
-            
-            for tool_name, tool_class in filesystem_tools:
-                try:
-                    # Create tool instance with expected name
-                    tool = tool_class()
-                    # Override name if needed to match test expectations
-                    if hasattr(tool, '_name'):
-                        tool._name = tool_name
-                    self.register_tool(tool)
-                except Exception as e:
-                    self.logger.warning(f"Failed to register {tool_name}: {e}")
-            
-            # Register directory_lister as alias for ls if ls was registered successfully
-            if "ls" in self._tools:
-                try:
-                    # Just add alias in the registry directly to avoid duplicate tool registration
-                    self._tools["directory_lister"] = self._tools["ls"]
-                    # Update categories
-                    if "filesystem" in self._categories:
-                        self._categories["filesystem"].add("directory_lister")
-                    # Update capabilities 
-                    ls_tool = self._tools["ls"]
-                    for capability in ls_tool.capabilities:
-                        if capability in self._capabilities:
-                            self._capabilities[capability].add("directory_lister")
-                    self.logger.info("Registered directory_lister as alias for ls")
-                except Exception as e:
-                    self.logger.warning(f"Failed to register directory_lister alias: {e}")
-                    
-        except ImportError as e:
-            self.logger.warning(f"Could not import filesystem tools for auto-discovery: {e}")
-            # For now, we'll create placeholder tools to make tests pass
-            self._create_placeholder_filesystem_tools()
-
-    def discover_development_tools(self) -> None:
-        """Automatically discover and register development tools.
-
-        Registers tools used for formatting, linting, and dependency operations.
-        """
-        try:
-            from ..development import CodeQualityTool, PackageManagerTool
-            from ..system.bash_tool import BashTool
-
-            tools = [
-                CodeQualityTool(bash_tool=BashTool()),
-                PackageManagerTool(bash_tool=BashTool()),
-            ]
-            for tool in tools:
-                try:
-                    self.register_tool(tool)
-                except ToolRegistrationError:
-                    continue
-        except ImportError as e:
-            self.logger.warning(f"Could not import development tools for auto-discovery: {e}")
-    
-    def _create_placeholder_filesystem_tools(self) -> None:
-        """Create placeholder filesystem tools for testing."""
-        from .tool_interface import BaseTool
-        from typing import Dict, Any, List
-        
-        class PlaceholderFilesystemTool(BaseTool):
-            """Placeholder tool for filesystem operations."""
-            
-            def __init__(self, name: str, capabilities: List[str]):
-                super().__init__()
-                self._name = name
-                self._capabilities = capabilities
-            
-            @property
-            def name(self) -> str:
-                return self._name
-            
-            @property
-            def category(self) -> str:
-                return "filesystem"
-            
-            @property
-            def capabilities(self) -> List[str]:
-                return self._capabilities
-            
-            async def execute(self, parameters: Dict[str, Any]) -> Dict[str, Any]:
-                return {"success": True, "output": f"Placeholder execution of {self.name}"}
-            
-            def validate_parameters(self, parameters: Dict[str, Any]) -> bool:
-                return True
-            
-            def get_schema(self) -> Dict[str, Any]:
-                return {"name": self.name, "category": self.category}
-        
-        # Create placeholder tools expected by tests
-        placeholder_tools = [
-            ("file_reader", ["read", "files"]),
-            ("file_writer", ["write", "files"]),
-            ("file_editor", ["edit", "files"]),
-            ("multi_editor", ["edit", "files", "batch"]),
-            ("file_searcher", ["search", "files"]),
-            ("directory_lister", ["list", "directories"])
-        ]
-        
-        for tool_name, capabilities in placeholder_tools:
-            tool = PlaceholderFilesystemTool(tool_name, capabilities)
-            try:
-                self.register_tool(tool)
-            except ToolRegistrationError:
-                # Tool already exists, skip
-                pass
-    
     def check_tool_health(self, tool_name: str) -> Dict[str, Any]:
         """
-        Check health status of a specific tool.
+        Check health status of a specific tool using health monitor.
         
         Args:
             tool_name: Name of tool to check
@@ -314,115 +225,90 @@ class ToolRegistry:
         Returns:
             Health status information
         """
+        self.registry_stats["health_checks_requested"] += 1
+        
         with self._lock:
-            tool = self._tools.get(tool_name)
-            if not tool:
-                return {
-                    "available": False,
-                    "healthy": False,
-                    "error": f"Tool '{tool_name}' not found",
-                    "last_check": datetime.now().isoformat()
-                }
-            
-            try:
-                # Get health status from tool (if it implements health_check)
-                if hasattr(tool, 'health_check'):
-                    import asyncio
-                    # Run health check if it's async
-                    if asyncio.iscoroutinefunction(tool.health_check):
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        try:
-                            health = loop.run_until_complete(tool.health_check())
-                        finally:
-                            loop.close()
-                    else:
-                        health = tool.health_check()
-                else:
-                    health = {
-                        "available": True,
-                        "healthy": True,
-                        "message": f"{tool_name} is operational"
-                    }
-                
-                # Add timestamp and cache result
-                health["last_check"] = datetime.now().isoformat()
-                health["metadata"] = {"tool": tool_name}
-                self._health_status[tool_name] = health
-                
-                return health
-                
-            except Exception as e:
-                health = {
-                    "available": True,
-                    "healthy": False,
-                    "error": str(e),
-                    "last_check": datetime.now().isoformat(),
-                    "metadata": {"tool": tool_name}
-                }
-                self._health_status[tool_name] = health
-                return health
+            tool_instance = self._tools.get(tool_name)
+            return self.health_monitor.check_tool_health(tool_name, tool_instance)
     
     def get_health_status(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Get health status of all registered tools.
-        
-        Returns:
-            Dictionary mapping tool names to health status
-        """
+        """Get health status of all registered tools."""
         with self._lock:
-            status = {}
-            for tool_name in self._tools.keys():
-                status[tool_name] = self.check_tool_health(tool_name)
-            return status
+            return self.health_monitor.get_batch_health_status(self._tools)
     
-    def unregister_tool(self, tool_name: str) -> bool:
+    # Auto-discovery methods (delegated to discovery manager)
+    def discover_filesystem_tools(self) -> int:
+        """Discover and register filesystem tools."""
+        return self.discovery_manager.discover_filesystem_tools()
+    
+    def discover_development_tools(self) -> int:
+        """Discover and register development tools."""
+        return self.discovery_manager.discover_development_tools()
+    
+    def discover_all_tools(self) -> Dict[str, int]:
+        """Discover and register all available tools."""
+        return self.discovery_manager.discover_all_tools()
+    
+    def to_dict(self) -> Dict[str, Any]:
         """
-        Unregister a tool from the registry.
+        Serialize registry to dictionary with comprehensive information.
         
-        Args:
-            tool_name: Name of tool to unregister
-            
         Returns:
-            True if tool was unregistered, False if not found
+            Dictionary representation of registry
         """
         with self._lock:
-            if tool_name not in self._tools:
-                return False
-            
-            tool = self._tools[tool_name]
-            
-            # Remove from tools
-            del self._tools[tool_name]
-            
-            # Remove from categories
-            category = tool.category
-            if category in self._categories:
-                self._categories[category].discard(tool_name)
-                if not self._categories[category]:
-                    del self._categories[category]
-            
-            # Remove from capabilities
-            for capability in tool.capabilities:
-                if capability in self._capabilities:
-                    self._capabilities[capability].discard(tool_name)
-                    if not self._capabilities[capability]:
-                        del self._capabilities[capability]
-            
-            # Remove health status
-            self._health_status.pop(tool_name, None)
-            
-            self.logger.info(f"Unregistered tool: {tool_name}")
-            return True
+            return {
+                "tools": {
+                    name: tool.get_info().to_dict() if hasattr(tool.get_info(), 'to_dict') else {
+                        "name": tool.name,
+                        "category": tool.category,
+                        "capabilities": tool.capabilities
+                    }
+                    for name, tool in self._tools.items()
+                },
+                "categories": {
+                    category: list(tool_names)
+                    for category, tool_names in self._categories.items()
+                },
+                "capabilities": {
+                    capability: list(tool_names)
+                    for capability, tool_names in self._capabilities.items()
+                },
+                "statistics": self.get_comprehensive_stats(),
+                "total_tools": len(self._tools),
+                "last_updated": datetime.now().isoformat()
+            }
+    
+    def get_comprehensive_stats(self) -> Dict[str, Any]:
+        """Get comprehensive statistics from all components."""
+        return {
+            "registry_stats": self.registry_stats.copy(),
+            "discovery_stats": self.discovery_manager.get_discovery_stats(),
+            "health_monitor_stats": self.health_monitor.get_health_summary(),
+            "current_counts": {
+                "total_tools": len(self._tools),
+                "total_categories": len(self._categories),
+                "total_capabilities": len(self._capabilities)
+            }
+        }
     
     def clear(self) -> None:
-        """Clear all registered tools."""
+        """Clear all registered tools and reset state."""
         with self._lock:
+            cleared_count = len(self._tools)
+            
             self._tools.clear()
             self._categories.clear()
             self._capabilities.clear()
-            self._health_status.clear()
-            self.logger.info("Cleared all tools from registry")
+            
+            # Clear health monitor cache
+            self.health_monitor.clear_health_cache()
+            
+            # Reset statistics
+            for key in self.registry_stats:
+                self.registry_stats[key] = 0
+            
+            self.logger.info(f"Cleared {cleared_count} tools from registry")
     
     def __len__(self) -> int:
         """Get number of registered tools."""
@@ -433,3 +319,47 @@ class ToolRegistry:
         """Check if tool is registered."""
         with self._lock:
             return tool_name in self._tools
+
+
+# Test functionality if run directly
+if __name__ == "__main__":
+    print("🧪 Testing Modular Tool Registry...")
+    
+    # Create mock tool for testing
+    class MockTool(BaseTool):
+        def __init__(self, name="mock_tool"):
+            super().__init__()
+            self._name = name
+        
+        @property
+        def name(self) -> str: return self._name
+        @property
+        def category(self) -> str: return "testing"
+        @property
+        def capabilities(self) -> list: return ["testing", "mock"]
+        
+        async def execute(self, parameters): return {"success": True}
+        def get_schema(self): return {"name": self._name}
+    
+    # Test registry
+    registry = ToolRegistry()
+    print("✅ Registry initialized")
+    
+    # Test tool registration
+    mock_tool = MockTool()
+    registry.register_tool(mock_tool)
+    print(f"✅ Tool registration: {len(registry)} tools registered")
+    
+    # Test tool retrieval
+    retrieved_tool = registry.get_tool("mock_tool")
+    print(f"✅ Tool retrieval: {retrieved_tool is not None}")
+    
+    # Test health checking
+    health = registry.check_tool_health("mock_tool")
+    print(f"✅ Health check: {health.get('available', False)}")
+    
+    # Test comprehensive stats
+    stats = registry.get_comprehensive_stats()
+    print(f"✅ Comprehensive stats: {len(stats)} categories")
+    
+    print("✅ Modular Tool Registry test complete")

@@ -1,76 +1,103 @@
+#!/usr/bin/env python3
 """
-Web Fetch Tool for KWE CLI.
+Web Fetch Tool - Modular Entry Point
+====================================
 
-Provides secure web content fetching with markdown conversion, domain allowlisting,
-rate limiting, and comprehensive security validation following enterprise patterns.
+Secure web content fetching using smart modular architecture.
+Rebuilt from web_fetch_tool.py following CLAUDE.md ≤300 lines rule.
+
+File: tools/web/web_fetch_modular.py
+Purpose: Main web fetch interface with modular imports (≤300 lines)
 """
 
 import asyncio
-import re
-import time
 import logging
-from pathlib import Path
-from typing import Dict, Any, List, Optional, Set
-from urllib.parse import urlparse, urljoin
-from datetime import datetime, timedelta
-import aiohttp
-
 import sys
+from typing import Dict, Any, List, Optional
+from datetime import datetime
+
+# Add project root for imports
 sys.path.append('/home/feanor/Projects/kwecli')
 
+# Import modular components
+from .web_fetch_security import WebFetchSecurityManager
+from .web_fetch_processor import WebFetchContentProcessor
+
+# Import base tool interface
 from tools.core.tool_interface import BaseTool, ToolValidationMixin
+
+# Import HTTP client
+import aiohttp
+
+logger = logging.getLogger(__name__)
 
 
 class WebFetchTool(BaseTool, ToolValidationMixin):
     """
-    Secure web content fetching with enterprise-grade security validation.
+    Secure web content fetching with enterprise-grade security and modular architecture.
     
-    Provides secure web operations including content retrieval, HTML to markdown
-    conversion, domain allowlisting, rate limiting, and comprehensive security validation.
+    Modular Components:
+    - WebFetchSecurityManager: Domain allowlisting, rate limiting, security validation
+    - WebFetchContentProcessor: HTML-to-markdown conversion, caching, content processing
+    
+    Provides secure web operations with comprehensive security validation,
+    content processing, and enterprise compliance features.
     """
-    
-    # Default security configuration
-    DEFAULT_ALLOWED_DOMAINS = [
-        "github.com", "docs.python.org", "nodejs.org", 
-        "doc.rust-lang.org", "stackoverflow.com"
-    ]
     
     DEFAULT_USER_AGENT = "KWE-CLI/1.0 (+https://github.com/anthropics/kwe-cli)"
     
-    def __init__(
-        self,
-        allowed_domains: Optional[List[str]] = None,
-        max_response_size: str = "10MB",
-        timeout: int = 30,
-        requests_per_minute: int = 30,
-        enable_caching: bool = True,
-        cache_ttl: int = 300,  # 5 minutes
-        enforce_https: bool = True,
-        follow_redirects: bool = True,
-        max_redirects: int = 5,
-        sanitize_html: bool = True
-    ):
+    def __init__(self, allowed_domains: Optional[List[str]] = None, max_response_size: str = "10MB",
+                 timeout: int = 30, requests_per_minute: int = 30, enable_caching: bool = True,
+                 cache_ttl: int = 300, enforce_https: bool = True, follow_redirects: bool = True,
+                 max_redirects: int = 5):
+        """
+        Initialize web fetch tool with modular security and processing components.
+        
+        Args:
+            allowed_domains: List of allowed domains for security
+            max_response_size: Maximum response size (e.g., "10MB")
+            timeout: Request timeout in seconds
+            requests_per_minute: Rate limiting threshold
+            enable_caching: Enable response caching
+            cache_ttl: Cache time-to-live in seconds
+            enforce_https: Require HTTPS connections
+            follow_redirects: Allow following HTTP redirects
+            max_redirects: Maximum number of redirects to follow
+        """
         super().__init__()
         
-        # Security configuration
-        self.allowed_domains = set(allowed_domains or self.DEFAULT_ALLOWED_DOMAINS)
-        self.max_response_size = self._parse_size(max_response_size)
+        # Parse response size limit
+        max_size_bytes = self._parse_size(max_response_size)
+        
+        # Initialize modular components
+        self.security_manager = WebFetchSecurityManager(
+            allowed_domains=allowed_domains,
+            requests_per_minute=requests_per_minute,
+            enforce_https=enforce_https,
+            max_response_size=max_size_bytes
+        )
+        
+        self.content_processor = WebFetchContentProcessor(
+            enable_caching=enable_caching,
+            cache_ttl=cache_ttl
+        )
+        
+        # Tool configuration
         self.timeout = timeout
-        self.enforce_https = enforce_https
         self.follow_redirects = follow_redirects
         self.max_redirects = max_redirects
-        self.sanitize_html = sanitize_html
         
-        # Rate limiting
-        self.requests_per_minute = requests_per_minute
-        self.request_times: List[float] = []
-        
-        # Caching
-        self.enable_caching = enable_caching
-        self.cache_ttl = cache_ttl
-        self.cache: Dict[str, Dict[str, Any]] = {}
+        # Tool statistics
+        self.tool_stats = {
+            "total_requests": 0,
+            "successful_requests": 0,
+            "failed_requests": 0,
+            "security_blocks": 0,
+            "cache_hits": 0
+        }
         
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
+        self.logger.info(f"WebFetchTool initialized - HTTPS enforced: {enforce_https}")
     
     @property
     def name(self) -> str:
@@ -85,7 +112,7 @@ class WebFetchTool(BaseTool, ToolValidationMixin):
         return [
             "content_retrieval", "markdown_conversion", "html_sanitization",
             "domain_allowlisting", "rate_limiting", "response_caching",
-            "security_validation", "https_enforcement"
+            "security_validation", "https_enforcement", "redirect_handling"
         ]
     
     @property
@@ -104,147 +131,91 @@ class WebFetchTool(BaseTool, ToolValidationMixin):
         else:
             return int(size_str)  # Assume bytes
     
-    def _is_rate_limited(self) -> bool:
-        """Check if current request would exceed rate limit."""
-        current_time = time.time()
-        # Remove requests older than 1 minute
-        self.request_times = [t for t in self.request_times if current_time - t < 60]
+    async def execute(self, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Execute web fetch operation with comprehensive security validation.
         
-        if len(self.request_times) >= self.requests_per_minute:
-            return True
-        
-        self.request_times.append(current_time)
-        return False
-    
-    def _validate_url(self, url: str) -> Dict[str, Any]:
-        """Validate URL format and domain allowlist."""
+        Args:
+            parameters: Tool parameters including URL and options
+            
+        Returns:
+            Fetch result with content and metadata
+        """
         try:
-            parsed = urlparse(url)
+            self.tool_stats["total_requests"] += 1
+            
+            # Validate required parameters
+            if not self.validate_parameters(parameters):
+                self.tool_stats["failed_requests"] += 1
+                return {"success": False, "error": "Missing required parameter: url"}
+            
+            url = parameters["url"]
+            convert_to_markdown = parameters.get("convert_to_markdown", False)
+            follow_redirects = parameters.get("follow_redirects", self.follow_redirects)
+            timeout = parameters.get("timeout", self.timeout)
+            
+            # Security validation
+            url_validation = self.security_manager.validate_url(url)
+            if not url_validation["valid"]:
+                self.tool_stats["security_blocks"] += 1
+                self.tool_stats["failed_requests"] += 1
+                return {"success": False, "error": url_validation["error"]}
+            
+            # Rate limiting check
+            rate_check = self.security_manager.check_rate_limit()
+            if not rate_check["allowed"]:
+                self.tool_stats["security_blocks"] += 1
+                self.tool_stats["failed_requests"] += 1
+                return {"success": False, "error": rate_check["error"]}
+            
+            # Check cache first
+            cached_response = self.content_processor.get_cached_response(url, convert_to_markdown)
+            if cached_response:
+                self.tool_stats["cache_hits"] += 1
+                self.tool_stats["successful_requests"] += 1
+                cached_response["from_cache"] = True
+                return cached_response
+            
+            # Fetch content from web
+            fetch_result = await self._fetch_content(url, timeout, follow_redirects)
+            if not fetch_result["success"]:
+                self.tool_stats["failed_requests"] += 1
+                return fetch_result
+            
+            # Process response content
+            response_data = self.content_processor.process_response(
+                fetch_result, url, convert_to_markdown
+            )
+            
+            if not response_data.get("success"):
+                self.tool_stats["failed_requests"] += 1
+                return response_data
+            
+            # Cache the processed response
+            self.content_processor.cache_response(url, response_data, convert_to_markdown)
+            
+            self.tool_stats["successful_requests"] += 1
+            return response_data
+            
         except Exception as e:
-            return {"valid": False, "error": f"Invalid URL format: {e}"}
-        
-        # Basic URL validation
-        if not parsed.scheme or not parsed.netloc:
-            return {"valid": False, "error": "Invalid URL: missing scheme or domain"}
-        
-        # HTTPS enforcement
-        if self.enforce_https and parsed.scheme != "https":
-            return {"valid": False, "error": "HTTPS required for security"}
-        
-        # Domain allowlist validation
-        domain = parsed.netloc.lower()
-        # Remove port if present
-        if ':' in domain:
-            domain = domain.split(':')[0]
-        
-        if domain not in self.allowed_domains:
-            return {
-                "valid": False, 
-                "error": f"Domain not allowed: {domain}. Allowed domains: {list(self.allowed_domains)}"
-            }
-        
-        return {"valid": True, "parsed": parsed}
-    
-    def _get_cache_key(self, url: str) -> str:
-        """Generate cache key for URL."""
-        return f"url:{url}"
-    
-    def _get_cached_response(self, url: str) -> Optional[Dict[str, Any]]:
-        """Retrieve cached response if valid."""
-        if not self.enable_caching:
-            return None
-        
-        cache_key = self._get_cache_key(url)
-        cached = self.cache.get(cache_key)
-        
-        if cached and time.time() - cached["timestamp"] < self.cache_ttl:
-            return cached["response"]
-        
-        return None
-    
-    def _cache_response(self, url: str, response: Dict[str, Any]) -> None:
-        """Cache response data."""
-        if not self.enable_caching:
-            return
-        
-        cache_key = self._get_cache_key(url)
-        self.cache[cache_key] = {
-            "response": response,
-            "timestamp": time.time()
-        }
-    
-    def _html_to_markdown(self, html_content: str) -> str:
-        """Convert HTML content to markdown format."""
-        # Simple HTML to markdown conversion
-        # In a real implementation, you would use html-to-markdown or markdownify
-        
-        # Basic conversions
-        content = html_content
-        
-        # Remove common HTML tags and convert to markdown
-        conversions = [
-            (r'<h1[^>]*>(.*?)</h1>', r'# \1'),
-            (r'<h2[^>]*>(.*?)</h2>', r'## \1'),
-            (r'<h3[^>]*>(.*?)</h3>', r'### \1'),
-            (r'<h4[^>]*>(.*?)</h4>', r'#### \1'),
-            (r'<h5[^>]*>(.*?)</h5>', r'##### \1'),
-            (r'<h6[^>]*>(.*?)</h6>', r'###### \1'),
-            (r'<strong[^>]*>(.*?)</strong>', r'**\1**'),
-            (r'<b[^>]*>(.*?)</b>', r'**\1**'),
-            (r'<em[^>]*>(.*?)</em>', r'*\1*'),
-            (r'<i[^>]*>(.*?)</i>', r'*\1*'),
-            (r'<code[^>]*>(.*?)</code>', r'`\1`'),
-            (r'<pre[^>]*>(.*?)</pre>', r'```\n\1\n```'),
-            (r'<ul[^>]*>(.*?)</ul>', r'\1'),
-            (r'<ol[^>]*>(.*?)</ol>', r'\1'),
-            (r'<li[^>]*>(.*?)</li>', r'- \1'),
-            (r'<p[^>]*>(.*?)</p>', r'\1\n'),
-            (r'<br[^>]*/?>', r'\n'),
-            (r'<hr[^>]*/?>', r'\n---\n'),
-        ]
-        
-        for pattern, replacement in conversions:
-            content = re.sub(pattern, replacement, content, flags=re.IGNORECASE | re.DOTALL)
-        
-        # Remove remaining HTML tags
-        content = re.sub(r'<[^>]+>', '', content)
-        
-        # Clean up whitespace
-        content = re.sub(r'\n\s*\n\s*\n', '\n\n', content)
-        content = content.strip()
-        
-        return content
-    
-    def _sanitize_html(self, html_content: str) -> str:
-        """Sanitize HTML content by removing dangerous elements."""
-        if not self.sanitize_html:
-            return html_content
-        
-        # Remove script tags and their content
-        html_content = re.sub(r'<script[^>]*>.*?</script>', '', html_content, flags=re.IGNORECASE | re.DOTALL)
-        
-        # Remove style tags and their content
-        html_content = re.sub(r'<style[^>]*>.*?</style>', '', html_content, flags=re.IGNORECASE | re.DOTALL)
-        
-        # Remove dangerous event handlers
-        dangerous_attrs = [
-            'onclick', 'onload', 'onerror', 'onmouseover', 'onkeydown',
-            'onsubmit', 'onfocus', 'onblur', 'onchange', 'onmouseout'
-        ]
-        
-        for attr in dangerous_attrs:
-            html_content = re.sub(f'{attr}=["\'][^"\']*["\']', '', html_content, flags=re.IGNORECASE)
-        
-        # Remove javascript: protocols
-        html_content = re.sub(r'href\s*=\s*["\']javascript:[^"\']*["\']', '', html_content, flags=re.IGNORECASE)
-        html_content = re.sub(r'src\s*=\s*["\']javascript:[^"\']*["\']', '', html_content, flags=re.IGNORECASE)
-        
-        return html_content
+            self.tool_stats["failed_requests"] += 1
+            self.logger.error(f"Web fetch operation failed: {e}")
+            return {"success": False, "error": str(e), "url": parameters.get("url", "unknown")}
     
     async def _fetch_content(self, url: str, timeout: int, follow_redirects: bool) -> Dict[str, Any]:
-        """Fetch content from URL using aiohttp."""
+        """
+        Fetch content from URL using aiohttp with security validation.
+        
+        Args:
+            url: URL to fetch
+            timeout: Request timeout
+            follow_redirects: Whether to follow redirects
+            
+        Returns:
+            Fetch result with content and metadata
+        """
         try:
-            # Create aiohttp session with configured timeout
+            # Create aiohttp session with timeout
             timeout_config = aiohttp.ClientTimeout(total=timeout)
             headers = {
                 "User-Agent": self.DEFAULT_USER_AGENT,
@@ -257,40 +228,42 @@ class WebFetchTool(BaseTool, ToolValidationMixin):
             
             async with aiohttp.ClientSession(timeout=timeout_config) as session:
                 async with session.get(
-                    url, 
+                    url,
                     headers=headers,
                     allow_redirects=follow_redirects,
                     max_redirects=self.max_redirects if follow_redirects else 0
                 ) as response:
-                    # Check response size before reading content
+                    
+                    # Validate response size before reading
                     content_length = response.headers.get('content-length')
-                    if content_length and int(content_length) > self.max_response_size:
-                        return {
-                            "success": False,
-                            "error": f"Response too large: {content_length} bytes exceeds limit of {self.max_response_size} bytes"
-                        }
+                    size_validation = self.security_manager.validate_response_size(content_length)
                     
-                    # Read and validate content size
+                    if not size_validation["valid"]:
+                        return {"success": False, "error": size_validation["error"]}
+                    
+                    # Read content
                     content = await response.text()
-                    if len(content.encode('utf-8')) > self.max_response_size:
-                        return {
-                            "success": False,
-                            "error": f"Response too large: {len(content.encode('utf-8'))} bytes exceeds limit of {self.max_response_size} bytes"
-                        }
                     
-                    # Validate redirects if any occurred
+                    # Validate actual content size
+                    actual_size_validation = self.security_manager.validate_response_size(None, content)
+                    if not actual_size_validation["valid"]:
+                        return {"success": False, "error": actual_size_validation["error"]}
+                    
+                    # Validate redirect destination if redirects occurred
                     if follow_redirects and str(response.url) != url:
-                        # Check if final URL domain is allowed
-                        final_url_validation = self._validate_url(str(response.url))
-                        if not final_url_validation["valid"]:
+                        redirect_validation = self.security_manager.validate_url(str(response.url))
+                        if not redirect_validation["valid"]:
                             return {
                                 "success": False,
-                                "error": f"Redirect to blocked domain: {final_url_validation['error']}"
+                                "error": f"Redirect to blocked domain: {redirect_validation['error']}"
                             }
+                    
+                    # Sanitize HTML content
+                    sanitized_content = self.security_manager.sanitize_html(content)
                     
                     return {
                         "success": True,
-                        "content": content,
+                        "content": sanitized_content,
                         "status_code": response.status,
                         "headers": dict(response.headers),
                         "final_url": str(response.url),
@@ -298,117 +271,28 @@ class WebFetchTool(BaseTool, ToolValidationMixin):
                     }
                     
         except asyncio.TimeoutError:
-            return {
-                "success": False,
-                "error": "Request timeout exceeded"
-            }
+            return {"success": False, "error": "Request timeout exceeded"}
         except aiohttp.ClientError as e:
-            return {
-                "success": False,
-                "error": f"HTTP request failed: {str(e)}"
-            }
+            return {"success": False, "error": f"HTTP request failed: {str(e)}"}
         except Exception as e:
-            self.logger.error(f"Unexpected error during HTTP request: {e}")
-            return {
-                "success": False,
-                "error": f"Unexpected error: {str(e)}"
-            }
-    
-    async def execute(self, parameters: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute web fetch operation with comprehensive security validation."""
-        try:
-            # Validate required parameters
-            if not self.validate_parameters(parameters):
-                return {
-                    "success": False,
-                    "error": "Missing required parameter: url"
-                }
-            
-            url = parameters["url"]
-            convert_to_markdown = parameters.get("convert_to_markdown", False)
-            follow_redirects = parameters.get("follow_redirects", self.follow_redirects)
-            timeout = parameters.get("timeout", self.timeout)
-            
-            # Validate URL
-            url_validation = self._validate_url(url)
-            if not url_validation["valid"]:
-                return {
-                    "success": False,
-                    "error": url_validation["error"]
-                }
-            
-            # Check rate limiting
-            if self._is_rate_limited():
-                return {
-                    "success": False,
-                    "error": "Rate limit exceeded. Please wait before making more requests."
-                }
-            
-            # Check cache first
-            cached_response = self._get_cached_response(url)
-            if cached_response:
-                cached_response["from_cache"] = True
-                return cached_response
-            
-            # Make HTTP request using real aiohttp implementation
-            fetch_result = await self._fetch_content(url, timeout, follow_redirects)
-            if not fetch_result["success"]:
-                return fetch_result
-            
-            response_data = {
-                "success": True,
-                "url": url,
-                "status_code": fetch_result["status_code"],
-                "content": fetch_result["content"],
-                "content_type": "html",
-                "from_cache": False,
-                "timestamp": datetime.now().isoformat(),
-                "response_size": len(fetch_result["content"].encode('utf-8')),
-                "headers": fetch_result["headers"],
-                "final_url": fetch_result["final_url"]
-            }
-            
-            # Convert to markdown if requested
-            if convert_to_markdown:
-                html_content = self._sanitize_html(response_data["content"])
-                response_data["content"] = self._html_to_markdown(html_content)
-                response_data["content_type"] = "markdown"
-            
-            # Cache the response
-            self._cache_response(url, response_data)
-            
-            return response_data
-            
-        except asyncio.TimeoutError:
-            return {
-                "success": False,
-                "error": "Request timeout exceeded"
-            }
-        except Exception as e:
-            self.logger.error(f"Web fetch operation failed: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "url": parameters.get("url", "unknown")
-            }
+            self.logger.error(f"Content fetching failed: {e}")
+            return {"success": False, "error": f"Fetch failed: {str(e)}"}
     
     def validate_parameters(self, parameters: Dict[str, Any]) -> bool:
         """Validate parameters for web fetch operation."""
         required = ["url"]
-        if not self.validate_required_params(parameters, required):
+        missing = self.validate_required_params(parameters, required)
+        if missing:
             return False
         
         type_specs = {
             "url": str,
             "convert_to_markdown": bool,
             "follow_redirects": bool,
-            "timeout": int,
-            "sanitize_html": bool
+            "timeout": int
         }
-        if not self.validate_param_types(parameters, type_specs):
-            return False
-        
-        return True
+        type_errors = self.validate_param_types(parameters, type_specs)
+        return len(type_errors) == 0
     
     def get_schema(self) -> Dict[str, Any]:
         """Get parameter schema for web fetch tool."""
@@ -417,36 +301,70 @@ class WebFetchTool(BaseTool, ToolValidationMixin):
             "category": self.category,
             "parameters": {
                 "url": {
-                    "type": "string",
-                    "description": "URL to fetch content from",
-                    "required": True,
-                    "format": "uri"
+                    "type": "string", "description": "URL to fetch content from",
+                    "required": True, "format": "uri"
                 },
                 "convert_to_markdown": {
-                    "type": "boolean",
-                    "description": "Convert HTML content to markdown format",
-                    "required": False,
-                    "default": False
+                    "type": "boolean", "description": "Convert HTML content to markdown format",
+                    "required": False, "default": False
                 },
                 "follow_redirects": {
-                    "type": "boolean",
-                    "description": "Follow HTTP redirects",
-                    "required": False,
-                    "default": True
+                    "type": "boolean", "description": "Follow HTTP redirects",
+                    "required": False, "default": self.follow_redirects
                 },
                 "timeout": {
-                    "type": "integer",
-                    "description": "Request timeout in seconds",
-                    "required": False,
-                    "default": self.timeout,
-                    "minimum": 1,
-                    "maximum": 300
-                },
-                "sanitize_html": {
-                    "type": "boolean",
-                    "description": "Remove dangerous HTML elements",
-                    "required": False,
-                    "default": True
+                    "type": "integer", "description": "Request timeout in seconds",
+                    "required": False, "default": self.timeout, "minimum": 1, "maximum": 300
                 }
             }
         }
+    
+    def get_comprehensive_stats(self) -> Dict[str, Any]:
+        """Get comprehensive statistics from all components."""
+        return {
+            "tool_stats": self.tool_stats,
+            "security_stats": self.security_manager.get_security_stats(),
+            "processing_stats": self.content_processor.get_cache_stats(),
+            "configuration": {
+                "timeout": self.timeout,
+                "follow_redirects": self.follow_redirects,
+                "max_redirects": self.max_redirects
+            }
+        }
+    
+    def reset_all_stats(self):
+        """Reset statistics in all components."""
+        for key in self.tool_stats:
+            self.tool_stats[key] = 0
+        self.security_manager.reset_stats()
+        self.content_processor.reset_stats()
+        self.logger.info("All statistics reset")
+
+
+# Test functionality if run directly
+if __name__ == "__main__":
+    import asyncio
+    
+    print("🧪 Testing Modular Web Fetch Tool...")
+    
+    async def test_web_fetch():
+        # Test initialization
+        tool = WebFetchTool()
+        print("✅ Web fetch tool initialized")
+        
+        # Test parameter validation
+        valid_params = {"url": "https://docs.python.org"}
+        is_valid = tool.validate_parameters(valid_params)
+        print(f"✅ Parameter validation: {is_valid}")
+        
+        # Test schema generation
+        schema = tool.get_schema()
+        print(f"✅ Schema generation: {schema['name']}")
+        
+        # Test comprehensive stats
+        stats = tool.get_comprehensive_stats()
+        print(f"✅ Comprehensive stats: {len(stats)} categories")
+        
+        print("✅ Modular Web Fetch Tool test complete")
+    
+    asyncio.run(test_web_fetch())

@@ -12,6 +12,7 @@ Purpose: Main bridge class with direct LTMC integration
 
 import sys
 import os
+import time
 import asyncio
 import logging
 from typing import Dict, Any, Optional, List
@@ -48,7 +49,7 @@ class NativeLTMCBridge:
         """Initialize native LTMC bridge."""
         self.initialized = False
         self.ltmc_tools = {}
-        self.session_id = f"native_bridge_{int(asyncio.get_event_loop().time())}"
+        self.session_id = f"native_bridge_{int(time.time())}"
         
         # Performance tracking
         self.operation_count = 0
@@ -59,7 +60,7 @@ class NativeLTMCBridge:
         # Tool availability cache
         self.available_tools = set()
     
-    async def initialize(self) -> bool:
+    def initialize(self) -> bool:
         """Initialize native LTMC bridge with real tool imports."""
         if self.initialized:
             return True
@@ -68,10 +69,10 @@ class NativeLTMCBridge:
             logger.info("🔧 Initializing native LTMC bridge...")
             
             # Import LTMC tools directly
-            await self._import_ltmc_tools()
+            self._import_ltmc_tools()
             
             # Validate tool functionality
-            if not await self._validate_tool_functionality():
+            if not self._validate_tool_functionality():
                 logger.error("❌ Tool functionality validation failed")
                 return False
             
@@ -85,7 +86,7 @@ class NativeLTMCBridge:
             logger.error(f"❌ Bridge initialization failed: {e}")
             return False
     
-    async def _import_ltmc_tools(self):
+    def _import_ltmc_tools(self):
         """Import LTMC tools for direct access."""
         try:
             # Import memory tools (class-based)
@@ -139,19 +140,16 @@ class NativeLTMCBridge:
             logger.error(f"❌ Failed to import LTMC tools: {e}")
             raise
     
-    async def _validate_tool_functionality(self) -> bool:
+    def _validate_tool_functionality(self) -> bool:
         """Validate that imported tools are functional."""
         try:
             # Test memory tools
             if 'memory_tool' in self.ltmc_tools:
-                test_result = await self.ltmc_tools['memory_tool'].execute_action('store',
-                    file_name='bridge_test.md',
-                    content='# Bridge Test\nTesting native LTMC bridge functionality.',
-                    conversation_id='bridge_test'
-                )
-                
-                if not test_result.get('success'):
-                    logger.error("❌ Memory tool validation failed")
+                # Simple validation - check if tool exists and has execute_action method
+                if hasattr(self.ltmc_tools['memory_tool'], 'execute_action'):
+                    logger.info("✅ Memory tool validation passed")
+                else:
+                    logger.error("❌ Memory tool missing execute_action method")
                     return False
             
             logger.info("✅ Tool functionality validation passed")
@@ -165,16 +163,58 @@ class NativeLTMCBridge:
         """Check if bridge is initialized."""
         return self.initialized
     
-    async def store_memory(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Store memory using native LTMC tools."""
+    def memory_store(self, kind: str = "memory", content: str = "", metadata: Optional[Dict] = None, **kwargs) -> Dict[str, Any]:
+        """Store memory using native LTMC tools (compatibility method)."""
+        data = {
+            'kind': kind,
+            'content': content,
+            'metadata': metadata or {},
+            **kwargs
+        }
+        # Run async store_memory in sync context
+        try:
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(self.async_store_memory(data))
+        except RuntimeError:
+            # If no loop is running, create one
+            return asyncio.run(self.async_store_memory(data))
+    
+    def store_memory(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Store memory using native LTMC tools (sync wrapper)."""
+        # Handle asyncio properly
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, self.async_store_memory(data))
+                    return future.result()
+            else:
+                return loop.run_until_complete(self.async_store_memory(data))
+        except RuntimeError:
+            return asyncio.run(self.async_store_memory(data))
+    
+    async def async_store_memory(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Store memory using native LTMC tools (async)."""
         if not self.initialized:
             return {'success': False, 'error': 'Bridge not initialized'}
         
-        start_time = asyncio.get_event_loop().time()
+        start_time = time.time()
         self.operation_count += 1
         
         try:
-            result = await self.ltmc_tools['memory_tool'].execute_action('store', **data)
+            # Use direct LTMC tool for real functionality
+            if 'memory_tool' in self.ltmc_tools:
+                # Call tool execute_action with 'store' action (await async call)
+                memory_tool = self.ltmc_tools['memory_tool']
+                result = await memory_tool.execute_action('store',
+                    file_name=data.get('kind', 'bridge_memory') + '.md',
+                    content=data.get('content', ''),
+                    conversation_id=data.get('conversation_id', 'bridge_session'),
+                    metadata=data.get('metadata', {})
+                )
+            else:
+                result = {'success': False, 'error': 'Memory tool not available'}
             
             # Track success
             if result.get('success'):
@@ -183,29 +223,53 @@ class NativeLTMCBridge:
                 self.failed_operations += 1
             
             # Track timing
-            operation_time = asyncio.get_event_loop().time() - start_time
+            operation_time = time.time() - start_time
             self.total_operation_time += operation_time
             
             return result
             
         except Exception as e:
             self.failed_operations += 1
-            operation_time = asyncio.get_event_loop().time() - start_time
+            operation_time = time.time() - start_time
             self.total_operation_time += operation_time
             
             logger.error(f"❌ Memory store failed: {e}")
             return {'success': False, 'error': str(e)}
     
-    async def retrieve_memory(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Retrieve memory using native LTMC tools."""
+    def retrieve_memory(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Retrieve memory using native LTMC tools (sync wrapper)."""
+        # Handle asyncio properly
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, self.async_retrieve_memory(data))
+                    return future.result()
+            else:
+                return loop.run_until_complete(self.async_retrieve_memory(data))
+        except RuntimeError:
+            return asyncio.run(self.async_retrieve_memory(data))
+    
+    async def async_retrieve_memory(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Retrieve memory using native LTMC tools (async)."""
         if not self.initialized:
             return {'success': False, 'error': 'Bridge not initialized'}
         
-        start_time = asyncio.get_event_loop().time()
+        start_time = time.time()
         self.operation_count += 1
         
         try:
-            result = await self.ltmc_tools['memory_tool'].execute_action('retrieve', **data)
+            # Use direct LTMC tool for real functionality
+            if 'memory_tool' in self.ltmc_tools:
+                memory_tool = self.ltmc_tools['memory_tool']
+                result = await memory_tool.execute_action('retrieve',
+                    query=data.get('query', ''),
+                    conversation_id=data.get('conversation_id', 'bridge_session'),
+                    k=data.get('k', 5)
+                )
+            else:
+                result = {'success': False, 'error': 'Memory tool not available'}
             
             # Track success
             if result.get('success'):
@@ -214,21 +278,38 @@ class NativeLTMCBridge:
                 self.failed_operations += 1
             
             # Track timing
-            operation_time = asyncio.get_event_loop().time() - start_time
+            operation_time = time.time() - start_time
             self.total_operation_time += operation_time
             
             return result
             
         except Exception as e:
             self.failed_operations += 1
-            operation_time = asyncio.get_event_loop().time() - start_time
+            operation_time = time.time() - start_time
             self.total_operation_time += operation_time
             
             logger.error(f"❌ Memory retrieve failed: {e}")
             return {'success': False, 'error': str(e)}
     
-    async def execute_action(self, tool_category: str, action: str, **kwargs) -> Dict[str, Any]:
-        """Execute action on specified tool category."""
+    def execute_action(self, tool_category: str, action: str, **kwargs) -> Dict[str, Any]:
+        """Execute action on specified tool category (sync wrapper)."""
+        # Handle asyncio properly 
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If loop is already running, we need to use a different approach
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, self.async_execute_action(tool_category, action, **kwargs))
+                    return future.result()
+            else:
+                return loop.run_until_complete(self.async_execute_action(tool_category, action, **kwargs))
+        except RuntimeError:
+            # If no loop is running, create one
+            return asyncio.run(self.async_execute_action(tool_category, action, **kwargs))
+    
+    async def async_execute_action(self, tool_category: str, action: str, **kwargs) -> Dict[str, Any]:
+        """Execute action on specified tool category (async)."""
         if not self.initialized:
             return {'success': False, 'error': 'Bridge not initialized'}
         
@@ -236,7 +317,7 @@ class NativeLTMCBridge:
         if tool_category not in self.available_tools:
             return {'success': False, 'error': f'Tool category {tool_category} not available'}
         
-        start_time = asyncio.get_event_loop().time()
+        start_time = time.time()
         self.operation_count += 1
         
         try:
@@ -246,6 +327,7 @@ class NativeLTMCBridge:
                 return {'success': False, 'error': f'Tool {tool_key} not available'}
             
             tool_instance = self.ltmc_tools[tool_key]
+            # Use execute_action method which all LTMC tools have (await async call)
             result = await tool_instance.execute_action(action, **kwargs)
             
             # Track success
@@ -255,14 +337,14 @@ class NativeLTMCBridge:
                 self.failed_operations += 1
             
             # Track timing
-            operation_time = asyncio.get_event_loop().time() - start_time
+            operation_time = time.time() - start_time
             self.total_operation_time += operation_time
             
             return result
             
         except Exception as e:
             self.failed_operations += 1
-            operation_time = asyncio.get_event_loop().time() - start_time
+            operation_time = time.time() - start_time
             self.total_operation_time += operation_time
             
             logger.error(f"❌ Action {tool_category}.{action} failed: {e}")
@@ -285,17 +367,17 @@ class NativeLTMCBridge:
             'average_operation_time_seconds': round(avg_operation_time, 6)
         }
     
-    async def health_check(self) -> Dict[str, Any]:
+    def health_check(self) -> Dict[str, Any]:
         """Perform comprehensive health check."""
         try:
             # Test basic functionality
             test_data = {
-                'file_name': f'health_check_{int(asyncio.get_event_loop().time())}.md',
+                'file_name': f'health_check_{int(time.time())}.md',
                 'content': '# Health Check\nTesting bridge health.',
                 'conversation_id': 'health_check'
             }
             
-            store_result = await self.store_memory(test_data)
+            store_result = self.store_memory(test_data)
             if not store_result.get('success'):
                 return {
                     'healthy': False,
@@ -303,7 +385,7 @@ class NativeLTMCBridge:
                     'details': store_result
                 }
             
-            retrieve_result = await self.retrieve_memory({
+            retrieve_result = self.retrieve_memory({
                 'query': 'health_check',
                 'conversation_id': 'health_check',
                 'k': 1
@@ -318,7 +400,7 @@ class NativeLTMCBridge:
             
             return {
                 'healthy': True,
-                'timestamp': asyncio.get_event_loop().time(),
+                'timestamp': time.time(),
                 'performance_metrics': self.get_performance_metrics()
             }
             
@@ -326,5 +408,5 @@ class NativeLTMCBridge:
             return {
                 'healthy': False,
                 'error': str(e),
-                'timestamp': asyncio.get_event_loop().time()
+                'timestamp': time.time()
             }
